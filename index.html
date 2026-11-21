@@ -91,6 +91,17 @@
   .row .grow { flex: 1; }
   .count { color: var(--muted); font-size: 14px; }
 
+  .quality { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--muted); }
+  .quality select {
+    min-height: 52px;
+    padding: 0 10px;
+    border-radius: 14px;
+    border: 1.5px solid var(--line);
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+    font-weight: 500;
+  }
   .btn {
     min-height: 52px;
     padding: 0 20px;
@@ -182,15 +193,13 @@
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
     padding: 6vh 22px 70vh;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 7%, #000 62%, rgba(0,0,0,.25) 100%);
-            mask-image: linear-gradient(to bottom, transparent 0, #000 7%, #000 62%, rgba(0,0,0,.25) 100%);
   }
   .scroller p {
     margin: 0 0 .7em;
     font-weight: 500;
     line-height: 1.45;
     text-align: start;
-    text-shadow: 0 1px 3px rgba(0,0,0,.9), 0 0 14px rgba(0,0,0,.6);
+    text-shadow: 0 1px 2px rgba(0,0,0,.9);
     overflow-wrap: anywhere;
   }
 
@@ -273,6 +282,12 @@
   <textarea id="script" dir="auto" placeholder="Paste your text here" aria-label="Script text" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
   <div class="row">
     <span class="count grow" id="count"></span>
+    <label class="quality">Quality
+      <select id="quality">
+        <option value="1080">1080p</option>
+        <option value="720">720p</option>
+      </select>
+    </label>
     <button class="btn" id="clear" type="button">Clear</button>
   </div>
   <button class="btn primary wide" id="open" type="button" disabled>Open camera</button>
@@ -388,6 +403,10 @@
   $("clear").addEventListener("click", function () { script.value = ""; store.set("tp.text", ""); updateCount(); script.focus(); });
   updateCount();
 
+  var qualitySel = $("quality");
+  qualitySel.value = store.get("tp.quality", "1080") === "720" ? "720" : "1080";
+  qualitySel.addEventListener("change", function () { store.set("tp.quality", qualitySel.value); });
+
   openBtn.addEventListener("click", openStage);
 
   /* ---------- Stage ---------- */
@@ -425,8 +444,9 @@
     if (typeof window.MediaRecorder === "undefined") {
       return camError("This browser can’t record video. Update iOS and try again.");
     }
+    var hd = qualitySel.value === "1080";
     navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user", width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+      video: { facingMode: "user", width: { ideal: hd ? 1920 : 1280 }, height: { ideal: hd ? 1080 : 720 }, frameRate: { ideal: 30, max: 30 } },
       audio: { echoCancellation: true, noiseSuppression: true }
     }).then(function (s) {
       if (stage.hidden) { s.getTracks().forEach(function (t) { t.stop(); }); return; }
@@ -434,6 +454,7 @@
       cam.srcObject = s;
       var p = cam.play(); if (p && p.catch) p.catch(function () {});
       rec.disabled = false;
+      watchCamera(s);
     }).catch(function (err) {
       var name = err && err.name;
       if (name === "NotAllowedError" || name === "SecurityError") {
@@ -450,6 +471,24 @@
   function camError(msg, err) {
     var detail = err ? " [" + (err.name || "Error") + (err.message ? ": " + err.message : "") + "]" : "";
     notice.textContent = msg + detail; notice.hidden = false; rec.disabled = true;
+  }
+
+  // Tell the reader straight away if the camera picture stops while recording
+  var lastFrameAt = 0, canWatchFrames = typeof cam.requestVideoFrameCallback === "function";
+  function warn(msg) { notice.textContent = msg; notice.hidden = false; }
+  function watchCamera(s) {
+    var vt = s.getVideoTracks()[0];
+    if (vt) {
+      vt.addEventListener("mute", function () { if (state === "recording") warn("The camera stopped sending picture. Stop and record again. [video track muted]"); });
+      vt.addEventListener("ended", function () { if (state === "recording") warn("The camera stopped. Stop and record again. [video track ended]"); });
+    }
+    if (canWatchFrames) {
+      var onFrame = function () {
+        lastFrameAt = Date.now();
+        if (stream === s) cam.requestVideoFrameCallback(onFrame);
+      };
+      cam.requestVideoFrameCallback(onFrame);
+    }
   }
 
   function stopCamera() {
@@ -515,7 +554,7 @@
   function startRecording() {
     if (!stream) { setIdleUi(); return; }
     var mime = pickMime();
-    var opts = { videoBitsPerSecond: 5000000, audioBitsPerSecond: 128000 };
+    var opts = { videoBitsPerSecond: qualitySel.value === "1080" ? 6000000 : 4000000, audioBitsPerSecond: 128000 };
     if (mime) opts.mimeType = mime;
     chunks = [];
     try { recorder = new MediaRecorder(stream, opts); }
@@ -538,6 +577,8 @@
     recLabel.textContent = "Stop";
     timer.classList.add("live");
     startedAt = Date.now();
+    lastFrameAt = Date.now();
+    notice.hidden = true;
     clockTimer = setInterval(tickClock, 500);
     tickClock();
   }
@@ -545,6 +586,9 @@
   function tickClock() {
     var s = Math.floor((Date.now() - startedAt) / 1000);
     clock.textContent = pad(Math.floor(s / 60)) + ":" + pad(s % 60);
+    if (canWatchFrames && state === "recording" && notice.hidden && Date.now() - lastFrameAt > 3000) {
+      warn("The camera picture froze. Stop and record again. [no new frames]");
+    }
   }
   function pad(n) { return n < 10 ? "0" + n : String(n); }
 
@@ -573,7 +617,11 @@
     if (blobUrl) URL.revokeObjectURL(blobUrl);
     blobUrl = URL.createObjectURL(blob);
     playback.src = blobUrl;
-    meta.textContent = clock.textContent + " long, " + (blob.size / 1048576).toFixed(1) + " MB, " + ext.toUpperCase();
+    var baseMeta = clock.textContent + " long, " + (blob.size / 1048576).toFixed(1) + " MB, " + ext.toUpperCase();
+    meta.textContent = baseMeta;
+    playback.onloadedmetadata = function () {
+      if (playback.videoWidth) meta.textContent = baseMeta + ", " + playback.videoWidth + "×" + playback.videoHeight;
+    };
     againBtn.textContent = "Record again";
     statusEl.textContent = "";
     setIdleUi();

@@ -491,6 +491,15 @@
     }
   }
 
+  // iOS sometimes pauses or stalls the live picture while the camera keeps running: start it again
+  var revivedAt = 0;
+  function revivePreview(reattach) {
+    if (!stream) return;
+    if (reattach) { cam.srcObject = null; cam.srcObject = stream; }
+    var p = cam.play(); if (p && p.catch) p.catch(function () {});
+  }
+  cam.addEventListener("pause", function () { revivePreview(false); });
+
   function stopCamera() {
     if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
     cam.srcObject = null;
@@ -569,7 +578,7 @@
       notice.hidden = false;
       if (state === "recording") stopRecording();
     };
-    recorder.start();
+    recorder.start(1000);   // hand over the video every second so iOS doesn't hold the whole recording in memory
 
     state = "recording";
     rec.classList.add("on");
@@ -586,8 +595,14 @@
   function tickClock() {
     var s = Math.floor((Date.now() - startedAt) / 1000);
     clock.textContent = pad(Math.floor(s / 60)) + ":" + pad(s % 60);
-    if (canWatchFrames && state === "recording" && notice.hidden && Date.now() - lastFrameAt > 3000) {
-      warn("The camera picture froze. Stop and record again. [no new frames]");
+    if (!canWatchFrames || state !== "recording") return;
+    var now = Date.now(), stalled = now - lastFrameAt;
+    if (stalled > 1500 && now - revivedAt > 3000) { revivedAt = now; revivePreview(true); }
+    if (stalled > 6000 && notice.hidden) {
+      var vt = stream && stream.getVideoTracks()[0];
+      warn("The camera picture froze. Stop and record again. [no new frames; paused=" + cam.paused +
+        ", track=" + (vt ? vt.readyState + (vt.muted ? "/muted" : "") : "none") +
+        ", recorder=" + (recorder ? recorder.state : "none") + "]");
     }
   }
   function pad(n) { return n < 10 ? "0" + n : String(n); }
